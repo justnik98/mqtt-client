@@ -10,6 +10,23 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/array.hpp>
 #include <boost/asio/write.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/signal_set.hpp>
+#include <boost/asio/write.hpp>
+#include <cstdio>
+#include <thread>
+#include <boost/asio/read.hpp>
+
+using boost::asio::ip::tcp;
+using boost::asio::awaitable;
+using boost::asio::co_spawn;
+using boost::asio::detached;
+using boost::asio::use_awaitable;
+namespace this_coro = boost::asio::this_coro;
+using boost::asio::ip::tcp;
 
 #define SMCBUFSIZE 1000
 
@@ -32,11 +49,11 @@ private:
     uint16_t port = 1883;
     uint8_t buffer[SMCBUFSIZE];
     bool last_pub_acked = true;
-    boost::asio::ip::tcp::socket *_socket;
     uint16_t msg_id = 1, pubacked_msg_id = 0;
 
     boost::asio::io_service ios;
     boost::asio::ip::tcp::socket socket = boost::asio::ip::tcp::socket(ios);
+    boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ios);
 
     // Write a header into the start of the buffer and return the number of bytes written
     uint16_t put_header(const uint8_t header, uint8_t *buf, const uint16_t len) {
@@ -47,8 +64,7 @@ private:
             v = l % 0x80;
             l /= 0x80;
             buf[pos++] = l > 0 ? v | 0x80 : v;
-        }
-        while (l != 0);
+        } while (l != 0);
         return pos;
     }
 
@@ -90,24 +106,40 @@ private:
         std::copy(buffer, buffer + len, buf.begin());
         auto b = boost::asio::buffer(buf, len);
         //auto ok = socket.write_some(b);
-        auto ok = boost::asio::write(socket,b);
+        auto ok = boost::asio::write(socket, b);
         std::cout << ok << std::endl;
+        char reply[max_length];
+        if(socket.available()){
+
+            socket.receive(boost::asio::buffer(reply, max_length));
+            std::cout << "Reply is: ";
+            std::cout.write(reply, 1024);
+            std::cout << "\n";
+        }
+
         return ok;
     }
+
+
+    const int max_length = 1024;
+
 
 public:
 
     Mqtt_client() {
         boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string("127.0.0.1"), port);
         socket.connect(endpoint);
+        std::cout << socket.local_endpoint() << std::endl;
     }
-    bool connect(){
-        char msg[] = {0x10,0x11, 0,4,'M','Q','T','T', 4,2,0, 0x3c,0,5,'P','Q','R','S','T'};
-        std::copy(msg, msg+sizeof(msg), buffer);
+
+    bool connect() {
+        char msg[] = {0x10, 0x11, 0, 4, 'M', 'Q', 'T', 'T', 4, 2, 0, 0x3c, 0, 5, 'P', 'Q', 'R', 'S', 'T'};
+        std::copy(msg, msg + sizeof(msg), buffer);
         return write_to_socket(sizeof(msg));
     }
+
     bool publish(const char *topic, const char *payload, const bool retain, const uint8_t qos = 0) {
-        return publish(topic,  payload, (uint16_t) strlen(payload), retain, qos);
+        return publish(topic, payload, (uint16_t) strlen(payload), retain, qos);
     }
 
 };
