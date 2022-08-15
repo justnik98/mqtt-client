@@ -21,14 +21,10 @@
 #include <boost/asio/read.hpp>
 
 using boost::asio::ip::tcp;
-using boost::asio::awaitable;
-using boost::asio::co_spawn;
-using boost::asio::detached;
-using boost::asio::use_awaitable;
-namespace this_coro = boost::asio::this_coro;
-using boost::asio::ip::tcp;
 
 #define SMCBUFSIZE 1000
+
+auto count = 0l;
 
 class Mqtt_client {
 private:
@@ -49,6 +45,7 @@ private:
     uint16_t port = 1883;
     uint8_t buffer[SMCBUFSIZE];
     bool last_pub_acked = true;
+    bool last_conn_acked = false;
     uint16_t msg_id = 1, pubacked_msg_id = 0;
 
     boost::asio::io_service ios;
@@ -98,6 +95,7 @@ private:
         len += put_string(payload, buffer, len);
         bool ok = write_to_socket(len);
         if (qos == 0) last_pub_acked = ok;
+        else if (!wait_puback(100)) throw std::invalid_argument("ERROR PUBLISH");;
         return ok;
     }
 
@@ -107,22 +105,69 @@ private:
         auto b = boost::asio::buffer(buf, len);
         //auto ok = socket.write_some(b);
         auto ok = boost::asio::write(socket, b);
-        std::cout << ok << std::endl;
-        char reply[max_length];
-        if(socket.available()){
-
-            socket.receive(boost::asio::buffer(reply, max_length));
-            std::cout << "Reply is: ";
-            std::cout.write(reply, 1024);
-            std::cout << "\n";
-        }
+        //std::cout << ok << std::endl;
+        read_from_socket();
 
         return ok;
     }
 
+    const int max_length = 256;
 
-    const int max_length = 1024;
+    bool read_from_socket() {
+        char8_t reply[max_length];
+        auto payload_len = 0;
+        if (socket.available()) {
 
+            socket.receive(boost::asio::buffer(reply, max_length));
+            std::cout << "Reply is: ";
+            if (reply[0] == CONNACK) {
+                return connack_handler();
+            }
+            if (reply[0] == PUBACK) {
+                return puback_handler(reply);
+            }
+
+        }
+        return payload_len;
+    }
+
+    bool puback_handler(char8_t *reply) {
+        auto payload_len = 0;
+        payload_len = reply[1] & 0x7F;
+        pubacked_msg_id = (reply[2] << 8) | reply[3];
+        if (pubacked_msg_id == msg_id) last_pub_acked = true;
+        for (auto i = 0; i < payload_len + 2; ++i) {
+            std::cout << std::hex << (int) reply[i];
+        }
+        std::cout << ' ' << payload_len << std::dec << "\n";
+        return last_pub_acked;
+    }
+
+    bool connack_handler() {
+        return last_conn_acked = true;
+    }
+
+    bool wait_puback(uint16_t timeout_ms = 100) {
+
+        using millis = std::chrono::duration<long, std::milli>;
+        auto start = std::chrono::system_clock::now();
+        while (!last_pub_acked &&
+               (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
+            read_from_socket();
+        }
+        return last_pub_acked;
+    }
+
+    bool wait_connack(uint16_t timeout_ms = 3000) {
+
+        using millis = std::chrono::duration<long, std::milli>;
+        auto start = std::chrono::system_clock::now();
+        while (!last_conn_acked &&
+               (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
+            read_from_socket();
+        }
+        return last_conn_acked;
+    }
 
 public:
 
@@ -135,7 +180,9 @@ public:
     bool connect() {
         char msg[] = {0x10, 0x11, 0, 4, 'M', 'Q', 'T', 'T', 4, 2, 0, 0x3c, 0, 5, 'P', 'Q', 'R', 'S', 'T'};
         std::copy(msg, msg + sizeof(msg), buffer);
-        return write_to_socket(sizeof(msg));
+        write_to_socket(sizeof(msg));
+        if (!wait_connack()) throw std::invalid_argument("ERROR");
+        return last_conn_acked;
     }
 
     bool publish(const char *topic, const char *payload, const bool retain, const uint8_t qos = 0) {
