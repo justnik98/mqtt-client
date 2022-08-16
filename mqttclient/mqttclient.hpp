@@ -25,9 +25,7 @@ using boost::asio::awaitable;
 using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::use_awaitable;
-#define SMCBUFSIZE 1000
-
-auto count = 0l;
+#define SMCBUFSIZE 1024
 
 class Mqtt_client {
 private:
@@ -46,6 +44,8 @@ private:
             CONNECT_7[7] = {0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04};
     const uint16_t KEEPALIVE_S = 60, PING_TIMEOUT = 15000;
     const uint32_t READ_TIMEOUT = 10000;
+    uint16_t try_num = 0;
+    const uint16_t max_try = 100;
     uint16_t port = 1883;
     uint8_t buffer[SMCBUFSIZE];
 
@@ -58,6 +58,7 @@ private:
     boost::asio::ip::tcp::socket socket = boost::asio::ip::tcp::socket(ioc);
     boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ioc);
     boost::asio::ip::tcp::endpoint endpoint;
+
     // Write a header into the start of the buffer and return the number of bytes written
     uint16_t put_header(const uint8_t header, uint8_t *buf, const uint16_t len) {
         uint16_t l = len;
@@ -90,9 +91,7 @@ private:
                  const uint8_t qos = 0) {
         auto len = 0;
         bool ok = false;
-        //send_pingreq();
         try {
-
             uint16_t total = ((uint16_t) strlen(topic) + 2) + (qos > 0 ? 2 : 0) + payloadlen + 2;
             if (last_pub_acked) {
                 last_pub_acked = false;
@@ -112,34 +111,30 @@ private:
             len += put_string(payload, buffer, len);
             ok = write_to_socket(len);
             if (qos == 0) last_pub_acked = ok;
-            else if (!wait_puback(1)) publish(topic, payload, retain, qos);
+            else if (!wait_puback(100)) {
+                if (try_num < max_try) {
+                    publish(topic, payload, retain, qos);
+                } else {
+                    throw (std::runtime_error("Connection refused!"));
+                }
+            }
         }
-        catch (boost::wrapexcept<boost::system::system_error> &e) {
-
+        catch (std::exception &e) {
             std::cerr << e.what();
-            socket.close();
-            socket.connect(endpoint);
         }
-//        catch (std::exception &e) {
-//        }
         return ok;
     }
 
     bool write_to_socket(size_t len) {
-        std::array<char, 64> buf{};
-        std::copy(buffer, buffer + len, buf.begin());
-        auto b = boost::asio::buffer(buf, len);
-
-        auto ok = boost::asio::write(socket, b);
-
-        return ok;
+        auto b = boost::asio::buffer(buffer, len);
+        boost::system::error_code err;
+        socket.write_some(b, err);
+        return true;
     }
 
     bool write_to_socket(const uint8_t *buf, const uint16_t len) {
         auto b = boost::asio::buffer(buf, len);
-
         auto ok = boost::asio::write(socket, b);
-
         return ok;
     }
 
@@ -159,11 +154,11 @@ private:
             auto payload_len = 0;
 
             size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
-            std::cout << "Reply is: ";
-            for (auto i = 0; i < n; ++i) {
-                std::cout << std::hex << (int) reply[i];
-            }
-            std::cout << std::endl;
+//            std::cout << "Reply is: ";
+//            for (auto i = 0; i < n; ++i) {
+//                std::cout << std::hex << (int) reply[i];
+//            }
+//            std::cout << std::endl;
             if (reply[0] == CONNACK) {
                 connack_handler();
             }
@@ -179,10 +174,6 @@ private:
         payload_len = reply[1] & 0x7F;
         pubacked_msg_id = (reply[2] << 8) | reply[3];
         if (pubacked_msg_id == msg_id) last_pub_acked = true;
-        for (auto i = 0; i < payload_len + 2; ++i) {
-            // std::cout << std::hex << (int) reply[i];
-        }
-        // std::cout << ' ' << payload_len << std::dec << "\n";
         return last_pub_acked;
     }
 
@@ -199,7 +190,7 @@ private:
         return last_pub_acked;
     }
 
-    bool wait_connack(uint16_t timeout_ms = 3000) {
+    bool wait_connack(uint16_t timeout_ms = 5000) {
 
         using millis = std::chrono::duration<long, std::milli>;
         auto start = std::chrono::system_clock::now();
