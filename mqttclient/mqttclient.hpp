@@ -34,7 +34,7 @@ private:
     const uint8_t CONNECT = 1 << 4,
             CONNACK = 2 << 4,
             PUBLISH = 3 << 4,
-            PUBDUP = 3 << 4 | 4,
+            PUBDUP = 3 << 4 | 8,
             PUBACK = 4 << 4,
             SUBSCRIBE = (8 << 4) | 2,
             SUBACK = 9 << 4,
@@ -57,7 +57,7 @@ private:
     boost::asio::io_service ioc;
     boost::asio::ip::tcp::socket socket = boost::asio::ip::tcp::socket(ioc);
     boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ioc);
-
+    boost::asio::ip::tcp::endpoint endpoint;
     // Write a header into the start of the buffer and return the number of bytes written
     uint16_t put_header(const uint8_t header, uint8_t *buf, const uint16_t len) {
         uint16_t l = len;
@@ -84,10 +84,13 @@ private:
         return put_string(text, (uint16_t) strlen(text), buf, pos);
     }
 
+    bool send_pingreq() { write_to_socket(PINGREQ_2, 2); }
+
     bool publish(const char *topic, const char *payload, const uint16_t payloadlen, const bool retain = false,
                  const uint8_t qos = 0) {
         auto len = 0;
         bool ok = false;
+        //send_pingreq();
         try {
 
             uint16_t total = ((uint16_t) strlen(topic) + 2) + (qos > 0 ? 2 : 0) + payloadlen + 2;
@@ -114,6 +117,8 @@ private:
         catch (boost::wrapexcept<boost::system::system_error> &e) {
 
             std::cerr << e.what();
+            socket.close();
+            socket.connect(endpoint);
         }
 //        catch (std::exception &e) {
 //        }
@@ -123,6 +128,14 @@ private:
     bool write_to_socket(size_t len) {
         std::array<char, 64> buf{};
         std::copy(buffer, buffer + len, buf.begin());
+        auto b = boost::asio::buffer(buf, len);
+
+        auto ok = boost::asio::write(socket, b);
+
+        return ok;
+    }
+
+    bool write_to_socket(const uint8_t *buf, const uint16_t len) {
         auto b = boost::asio::buffer(buf, len);
 
         auto ok = boost::asio::write(socket, b);
@@ -199,7 +212,8 @@ private:
 public:
 
     Mqtt_client() {
-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string("127.0.0.1"), port);
+        endpoint.address(boost::asio::ip::address::from_string("127.0.0.1"));
+        endpoint.port(port);
         std::thread([&]() { read(); }).detach();
         socket.connect(endpoint);
         std::cout << socket.local_endpoint() << std::endl;
