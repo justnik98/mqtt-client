@@ -21,7 +21,10 @@
 #include <boost/asio/read.hpp>
 
 using boost::asio::ip::tcp;
-
+using boost::asio::awaitable;
+using boost::asio::co_spawn;
+using boost::asio::detached;
+using boost::asio::use_awaitable;
 #define SMCBUFSIZE 1000
 
 auto count = 0l;
@@ -31,6 +34,7 @@ private:
     const uint8_t CONNECT = 1 << 4,
             CONNACK = 2 << 4,
             PUBLISH = 3 << 4,
+            PUBDUP = 3 << 4 | 4,
             PUBACK = 4 << 4,
             SUBSCRIBE = (8 << 4) | 2,
             SUBACK = 9 << 4,
@@ -44,13 +48,15 @@ private:
     const uint32_t READ_TIMEOUT = 10000;
     uint16_t port = 1883;
     uint8_t buffer[SMCBUFSIZE];
-    bool last_pub_acked = true;
-    bool last_conn_acked = false;
-    uint16_t msg_id = 1, pubacked_msg_id = 0;
 
-    boost::asio::io_service ios;
-    boost::asio::ip::tcp::socket socket = boost::asio::ip::tcp::socket(ios);
-    boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ios);
+    std::atomic<bool> last_pub_acked = true;
+    std::atomic<bool> last_conn_acked = false;
+
+    std::atomic<uint16_t> msg_id = 1, pubacked_msg_id = 0;
+
+    boost::asio::io_service ioc;
+    boost::asio::ip::tcp::socket socket = boost::asio::ip::tcp::socket(ioc);
+    boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ioc);
 
     // Write a header into the start of the buffer and return the number of bytes written
     uint16_t put_header(const uint8_t header, uint8_t *buf, const uint16_t len) {
@@ -78,24 +84,39 @@ private:
         return put_string(text, (uint16_t) strlen(text), buf, pos);
     }
 
-    bool publish(const char *topic, const char *payload, const uint16_t payloadlen, const bool retain,
+    bool publish(const char *topic, const char *payload, const uint16_t payloadlen, const bool retain = false,
                  const uint8_t qos = 0) {
-        last_pub_acked = false;
-        uint16_t total = ((uint16_t) strlen(topic) + 2) + (qos > 0 ? 2 : 0) + payloadlen + 2,
+        auto len = 0;
+        bool ok = false;
+        try {
+
+            uint16_t total = ((uint16_t) strlen(topic) + 2) + (qos > 0 ? 2 : 0) + payloadlen + 2;
+            if (last_pub_acked) {
+                last_pub_acked = false;
                 len = put_header(PUBLISH, buffer, total);
-        if (retain) buffer[0] |= 1;
-        buffer[0] |= qos << 1; // Add QOS into second or third bit
-        len += put_string(topic, buffer, len);
-        if (qos > 0) {
-            if (++msg_id == 0) msg_id++;
-            buffer[len++] = msg_id >> 8;
-            buffer[len++] = msg_id & 0xFF;
+            } else {
+                len = put_header(PUBDUP, buffer, total);
+            }
+            if (retain) buffer[0] |= 1;
+            buffer[0] |= qos << 1; // Add QOS into second or third bit
+            len += put_string(topic, buffer, len);
+            if (qos > 0) {
+                if (++msg_id == 0) msg_id++;
+                buffer[len++] = msg_id >> 8;
+                buffer[len++] = msg_id & 0xFF;
+            }
+            //memcpy(&buffer[len], payload, payloadlen);
+            len += put_string(payload, buffer, len);
+            ok = write_to_socket(len);
+            if (qos == 0) last_pub_acked = ok;
+            else if (!wait_puback(1)) publish(topic, payload, retain, qos);
         }
-        //memcpy(&buffer[len], payload, payloadlen);
-        len += put_string(payload, buffer, len);
-        bool ok = write_to_socket(len);
-        if (qos == 0) last_pub_acked = ok;
-        else if (!wait_puback(100)) throw std::invalid_argument("ERROR PUBLISH");;
+        catch (boost::wrapexcept<boost::system::system_error> &e) {
+
+            std::cerr << e.what();
+        }
+//        catch (std::exception &e) {
+//        }
         return ok;
     }
 
@@ -103,43 +124,52 @@ private:
         std::array<char, 64> buf{};
         std::copy(buffer, buffer + len, buf.begin());
         auto b = boost::asio::buffer(buf, len);
-        //auto ok = socket.write_some(b);
+
         auto ok = boost::asio::write(socket, b);
-        //std::cout << ok << std::endl;
-        read_from_socket();
 
         return ok;
     }
 
-    const int max_length = 256;
+    const int max_length = 1024;
 
-    bool read_from_socket() {
-        char8_t reply[max_length];
-        auto payload_len = 0;
-        if (socket.available()) {
+    void read() {
+        boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+        signals.async_wait([&](auto, auto) { ioc.stop(); });
+        co_spawn(ioc, read_from_socket(), detached);
 
-            socket.receive(boost::asio::buffer(reply, max_length));
+        ioc.run();
+    }
+
+    awaitable<void> read_from_socket() {
+        char8_t reply[1024];
+        while (true) {
+            auto payload_len = 0;
+
+            size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
             std::cout << "Reply is: ";
+            for (auto i = 0; i < n; ++i) {
+                std::cout << std::hex << (int) reply[i];
+            }
+            std::cout << std::endl;
             if (reply[0] == CONNACK) {
-                return connack_handler();
+                connack_handler();
             }
             if (reply[0] == PUBACK) {
-                return puback_handler(reply);
+                puback_handler(reinterpret_cast<char8_t *>(reply), n);
             }
 
         }
-        return payload_len;
     }
 
-    bool puback_handler(char8_t *reply) {
+    bool puback_handler(char8_t *reply, size_t len) {
         auto payload_len = 0;
         payload_len = reply[1] & 0x7F;
         pubacked_msg_id = (reply[2] << 8) | reply[3];
         if (pubacked_msg_id == msg_id) last_pub_acked = true;
         for (auto i = 0; i < payload_len + 2; ++i) {
-            std::cout << std::hex << (int) reply[i];
+            // std::cout << std::hex << (int) reply[i];
         }
-        std::cout << ' ' << payload_len << std::dec << "\n";
+        // std::cout << ' ' << payload_len << std::dec << "\n";
         return last_pub_acked;
     }
 
@@ -148,12 +178,10 @@ private:
     }
 
     bool wait_puback(uint16_t timeout_ms = 100) {
-
         using millis = std::chrono::duration<long, std::milli>;
         auto start = std::chrono::system_clock::now();
         while (!last_pub_acked &&
                (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
-            read_from_socket();
         }
         return last_pub_acked;
     }
@@ -164,7 +192,6 @@ private:
         auto start = std::chrono::system_clock::now();
         while (!last_conn_acked &&
                (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
-            read_from_socket();
         }
         return last_conn_acked;
     }
@@ -173,8 +200,10 @@ public:
 
     Mqtt_client() {
         boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string("127.0.0.1"), port);
+        std::thread([&]() { read(); }).detach();
         socket.connect(endpoint);
         std::cout << socket.local_endpoint() << std::endl;
+        signal(SIGPIPE, SIG_IGN);
     }
 
     bool connect() {
