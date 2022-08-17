@@ -202,7 +202,8 @@ Mqtt_client::Mqtt_client(const string &ip, uint16_t port) : port(port) {
 }
 
 bool Mqtt_client::connect() {
-    uint8_t msg[] = {CONNECT, 0x11, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x05, 'P', 'Q', 'R', 'S', 'T'};
+    uint8_t msg[] = {CONNECT, 0x11, 0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x05, 'P', 'Q', 'R',
+                     'S', 'T'};
     std::copy(msg, msg + sizeof(msg), buffer);
     write_to_socket(sizeof(msg));
     if (!wait_connack()) throw std::invalid_argument("ERROR");
@@ -245,6 +246,22 @@ bool Mqtt_client::subscribe(const char *topic, const uint8_t qos, bool unsubscri
     return ok;
 }
 
+bool Mqtt_client::subscribe(const char *topic, uint8_t qos) {
+    return subscribe(topic, qos, false);
+}
+
+bool Mqtt_client::unsubscribe(const char *topic, uint8_t qos) {
+    return subscribe(topic, qos, true);
+}
+
 bool Mqtt_client::connack_handler() {
     return last_conn_acked = true;
 }
+
+Mqtt_client::~Mqtt_client() {
+    write_to_socket(DISCONNECT_2, 2);
+}
+
+
+
+

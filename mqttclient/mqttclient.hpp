@@ -42,12 +42,12 @@ private:
             UNSUBACK = 11 << 4,
             PINGREQ_2[2] = {12 << 4, 0},
             PINGRESP_2[2] = {13 << 4, 0}, //TODO: реализовать поддержку
-    DISCONNECT_2[2] = {14 << 4, 0}; //TODO: реализовать поддержку
+            DISCONNECT_2[2] = {14 << 4, 0};
     //CONNECT_7[7] = {0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04};
 
 
     const uint16_t KEEPALIVE_S = 60, PING_TIMEOUT = 15000;
-    const uint32_t READ_TIMEOUT = 10000;
+    const uint32_t READ_TIMEOUT = 10000; //TODO: реализовать поддержку
     uint16_t try_num = 0;
     const uint16_t max_try = 100;
     uint16_t port = 1883;
@@ -101,6 +101,8 @@ private:
 
     void message_handler(char8_t *reply, size_t len);
 
+    bool subscribe(const char *topic, uint8_t qos, bool unsubscribe);
+
 public:
 
     //user callbacks
@@ -112,7 +114,11 @@ public:
 
     bool publish(const char *topic, const char *payload, bool retain, uint8_t qos = 0);
 
-    bool subscribe(const char *topic, uint8_t qos = 0, bool unsubscribe = false);
+    bool subscribe(const char *topic, uint8_t qos = 0);
+
+    bool unsubscribe(const char *topic, uint8_t qos = 0);
+
+    virtual ~Mqtt_client();
 };
 
 
