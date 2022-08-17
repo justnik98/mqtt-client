@@ -5,10 +5,10 @@
 #ifndef MQTT_CLIENT_MQTTCLIENT_HPP
 #define MQTT_CLIENT_MQTTCLIENT_HPP
 
-#include <string>
+
+#include <boost/array.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/array.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -16,9 +16,10 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/write.hpp>
-#include <cstdio>
-#include <thread>
 #include <boost/asio/read.hpp>
+#include <cstdio>
+#include <string>
+#include <thread>
 
 using std::string;
 using boost::asio::ip::tcp;
@@ -40,9 +41,9 @@ private:
             UNSUBSCRIBE = (10 << 4) | 2,
             UNSUBACK = 11 << 4,
             PINGREQ_2[2] = {12 << 4, 0},
-            PINGRESP_2[2] = {13 << 4, 0},
-            DISCONNECT_2[2] = {14 << 4, 0},
-            CONNECT_7[7] = {0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04};
+            PINGRESP_2[2] = {13 << 4, 0}, //TODO: реализовать поддержку
+    DISCONNECT_2[2] = {14 << 4, 0}; //TODO: реализовать поддержку
+    //CONNECT_7[7] = {0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04};
 
 
     const uint16_t KEEPALIVE_S = 60, PING_TIMEOUT = 15000;
@@ -62,256 +63,56 @@ private:
     boost::asio::ip::tcp::socket socket_in = boost::asio::ip::tcp::socket(ioc);
     boost::asio::ip::tcp::endpoint endpoint;
 
-    const char *next_topic(const char *p) {
-        while (*p && *p != ',') p++;
-        return p;
-    }
+    static const char *next_topic(const char *p);
 
     // Write a header into the start of the buffer and return the number of bytes written
-    uint16_t put_header(const uint8_t header, uint8_t *buf, const uint16_t len) {
-        uint16_t l = len;
-        uint8_t pos = 0, v;
-        buf[pos++] = header;
-        do {
-            v = l % 0x80;
-            l /= 0x80;
-            buf[pos++] = l > 0 ? v | 0x80 : v;
-        } while (l != 0);
-        return pos;
-    }
+    static uint16_t put_header(uint8_t header, uint8_t *buf, uint16_t len);
 
-    static uint16_t put_string(const char *text, uint16_t len, uint8_t *buf, const uint16_t pos) {
-        uint16_t p = pos;
-        if (len == 0) return 0;
-        buf[p++] = len >> 8;
-        buf[p++] = len & 0xFF;
-        memcpy(&buf[p], text, len);
-        return 2 + len;
-    }
+    static uint16_t put_string(const char *text, uint16_t len, uint8_t *buf, uint16_t pos);
 
-    uint16_t put_string(const char *text, uint8_t *buf, const uint16_t pos) {
-        return put_string(text, (uint16_t) strlen(text), buf, pos);
-    }
+    static uint16_t put_string(const char *text, uint8_t *buf, uint16_t pos);
 
-    bool send_pingreq() { write_to_socket(PINGREQ_2, 2); }
+    bool send_pingreq();
 
-    bool publish(const char *topic, const char *payload, const uint16_t payloadlen, const bool retain = false,
-                 const uint8_t qos = 0) {
-        auto len = 0;
-        bool ok = false;
-        try {
-            uint16_t total = ((uint16_t) strlen(topic) + 2) + (qos > 0 ? 2 : 0) + payloadlen + 2;
-            if (last_pub_acked) {
-                last_pub_acked = false;
-                len = put_header(PUBLISH, buffer, total);
-            } else {
-                len = put_header(PUBDUP, buffer, total);
-            }
-            if (retain) buffer[0] |= 1;
-            buffer[0] |= qos << 1; // Add QOS into second or third bit
-            len += put_string(topic, buffer, len);
-            if (qos > 0) {
-                if (++msg_id == 0) msg_id++;
-                buffer[len++] = msg_id >> 8;
-                buffer[len++] = msg_id & 0xFF;
-            }
-            //memcpy(&buffer[len], payload, payloadlen);
-            len += put_string(payload, buffer, len);
-            ok = write_to_socket(len);
-            if (qos == 0) last_pub_acked = ok;
-            else if (!wait_puback(100)) {
-                if (try_num < max_try) {
-                    publish(topic, payload, retain, qos);
-                } else {
-                    throw (std::runtime_error("Connection refused!"));
-                }
-            }
-        }
-        catch (std::exception &e) {
-            std::cerr << e.what();
-        }
-        return ok;
-    }
+    bool publish(const char *topic, const char *payload, uint16_t payloadlen, bool retain = false,
+                 uint8_t qos = 0);
 
-    void suback_handler(const uint8_t *buf, const uint16_t packet_len, bool unsubscribe) {
-        if (packet_len == (unsubscribe ? 4 : 5) && buf[0] == (unsubscribe ? UNSUBACK : SUBACK)) {
-            uint16_t mess_id = (buf[2] << 8) | buf[3];
-            if (!unsubscribe && buf[4] > 2) return; // Return code indicates failure
-            if (mess_id == msg_id) {
-                last_sub_acked = true;
-                try_num = 0;
-            }
-        }
-    }
+    void suback_handler(const uint8_t *buf, uint16_t packet_len, bool unsubscribe);
 
-    bool write_to_socket(size_t len) {
-        auto b = boost::asio::buffer(buffer, len);
-        boost::system::error_code err;
-        socket.write_some(b, err);
-        return true;
-    }
+    bool write_to_socket(size_t len);
 
-    bool write_to_socket(const uint8_t *buf, const uint16_t len) {
-        auto b = boost::asio::buffer(buf, len);
-        auto ok = socket.write_some(b);
-        return ok;
-    }
+    bool write_to_socket(const uint8_t *buf, uint16_t len);
 
     const int max_length = 1024;
 
-    void read() {
-        boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
-        signals.async_wait([&](auto, auto) { ioc.stop(); });
-        co_spawn(ioc, read_from_socket(), detached);
+    void read();
 
-        ioc.run();
-    }
+    awaitable<void> read_from_socket();
 
-    awaitable<void> read_from_socket() {
-        char8_t reply[1024];
-        while (true) {
-            auto payload_len = 0;
-            size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
+    bool puback_handler(const char8_t *reply, size_t len);
 
-            if (reply[0] == PUBACK) {
-                puback_handler(reinterpret_cast<char8_t *>(reply), n);
-            } else if ((reply[0] & PUBLISH) == PUBLISH) {
-                message_handler(reply, n);
-            } else if (reply[0] == SUBACK) {
-                suback_handler(reinterpret_cast<const uint8_t *>(reply), n, false);
-            } else if (reply[0] == UNSUBACK) {
-                suback_handler(reinterpret_cast<const uint8_t *>(reply), n, true);
-            } else if (reply[0] == CONNACK) {
-                connack_handler();
-            }
-        }
-    }
+    bool connack_handler();
 
-    bool puback_handler(const char8_t *reply, size_t len) {
-        pubacked_msg_id = (reply[2] << 8) | reply[3];
-        if (pubacked_msg_id == msg_id) {
-            last_pub_acked = true;
-            try_num = 0;
-        }
-        return last_pub_acked;
-    }
+    bool wait_puback(uint16_t timeout_ms = 100);
 
-    bool connack_handler() {
-        return last_conn_acked = true;
-    }
+    bool wait_suback(uint16_t timeout_ms = 100);
 
-    bool wait_puback(uint16_t timeout_ms = 100) {
-        using millis = std::chrono::duration<long, std::milli>;
-        auto start = std::chrono::system_clock::now();
-        while (!last_pub_acked &&
-               (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
-        }
-        return last_pub_acked;
-    }
+    bool wait_connack(uint16_t timeout_ms = 5000);
 
-    bool wait_suback(uint16_t timeout_ms = 100) {
-        using millis = std::chrono::duration<long, std::milli>;
-        auto start = std::chrono::system_clock::now();
-        while (!last_sub_acked &&
-               (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
-        }
-        return last_sub_acked;
-    }
-
-    bool wait_connack(uint16_t timeout_ms = 5000) {
-
-        using millis = std::chrono::duration<long, std::milli>;
-        auto start = std::chrono::system_clock::now();
-        while (!last_conn_acked &&
-               (std::chrono::duration_cast<millis>(std::chrono::system_clock::now() - start).count() < timeout_ms)) {
-        }
-        return last_conn_acked;
-    }
-
-    void message_handler(char8_t *reply, size_t len) {
-        std::cout << std::endl;
-        string rep((char *) reply, len);
-        uint16_t qos = (reply[0] & 0x07) >> 1;
-        std::cout << qos;
-        uint16_t payload_start = len / 128 + 2;
-        uint16_t topic_len = reply[payload_start] << 8 | reply[payload_start + 1];
-        uint16_t header_len = payload_start + 2;
-        string topic = rep.substr(header_len, topic_len);
-        string msg = rep.substr(header_len + (qos ? 2 : 0) + topic_len);
-
-        uint16_t rec_msg_id[] = {reply[header_len + topic_len], reply[header_len + topic_len + 1]};
-        if (qos == 1) {
-            buffer[0] = PUBACK;
-            buffer[1] = 0x2;
-            buffer[2] = rec_msg_id[0];
-            buffer[3] = rec_msg_id[1];
-            write_to_socket(4);
-        }
-        on_message(topic, msg);
-    }
+    void message_handler(char8_t *reply, size_t len);
 
 public:
 
     //user callbacks
     std::function<void(const string &, const string &)> on_message = nullptr;
 
-    Mqtt_client(const string &ip = "127.0.0.1", uint16_t port = 1883) : port(port) {
-        endpoint.address(boost::asio::ip::address::from_string(ip));
-        endpoint.port(port);
-        std::thread([&]() { read(); }).detach();
-        std::thread([&]() {
-            while (true) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(PING_TIMEOUT));
-                send_pingreq();
-            }
-        }).detach();
-        socket.connect(endpoint);
-        std::cout << socket.local_endpoint() << std::endl;
-        signal(SIGPIPE, SIG_IGN);
-    }
+    explicit Mqtt_client(const string &ip = "127.0.0.1", uint16_t port = 1883);
 
-    bool connect() {
-        char msg[] = {0x10, 0x11, 0, 4, 'M', 'Q', 'T', 'T', 4, 2, 0, 0x3c, 0, 5, 'P', 'Q', 'R', 'S', 'T'};
-        std::copy(msg, msg + sizeof(msg), buffer);
-        write_to_socket(sizeof(msg));
-        if (!wait_connack()) throw std::invalid_argument("ERROR");
-        return last_conn_acked;
-    }
+    bool connect();
 
-    bool publish(const char *topic, const char *payload, const bool retain, const uint8_t qos = 0) {
-        return publish(topic, payload, (uint16_t) strlen(payload), retain, qos);
-    }
+    bool publish(const char *topic, const char *payload, bool retain, uint8_t qos = 0);
 
-    bool subscribe(const char *topic, const uint8_t qos = 0, bool unsubscribe = false) {
-        last_sub_acked = false;
-        uint16_t payload_len = 2; // packet identifier
-        const char *p = topic, *p2 = p;
-        while (*p && (p2 = next_topic(p))) { // Find next comma or final null-terminator
-            payload_len += ((uint16_t) (p2 - p) + 2) + (unsubscribe ? 0 : 1);
-            p = *p2 ? p2 + 1 : p2; // Skip comma if several topics are listed
-        }
-        // Add header and packet identifier
-        uint16_t len = put_header(unsubscribe ? UNSUBSCRIBE : SUBSCRIBE, buffer, payload_len);
-        if (++msg_id == 0) msg_id++; // Avoid 0
-        buffer[len++] = msg_id >> 8;
-        buffer[len++] = msg_id & 0xFF;
-        // Add each topic
-        p = topic;
-        while (*p && (p2 = next_topic(p))) {
-            payload_len += ((uint16_t) (p2 - p) + 2) + (unsubscribe ? 0 : 1);
-            len += put_string(p, (uint16_t) (p2 - p), buffer, len);
-            if (!unsubscribe) buffer[len++] = qos;
-            p = *p2 ? p2 + 1 : p2; // Skip comma if several topics are listed
-        }
-        write_to_socket(len);
-        if (!wait_suback(100)) {
-            if (try_num < max_try) {
-                subscribe(topic, qos, unsubscribe);
-            } else {
-                throw (std::runtime_error("Connection refused!"));
-            }
-        }
-    }
+    bool subscribe(const char *topic, uint8_t qos = 0, bool unsubscribe = false);
 };
 
 
