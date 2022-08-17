@@ -153,7 +153,7 @@ private:
 
     bool write_to_socket(const uint8_t *buf, const uint16_t len) {
         auto b = boost::asio::buffer(buf, len);
-        auto ok = boost::asio::write(socket, b);
+        auto ok = socket.write_some(b);
         return ok;
     }
 
@@ -171,7 +171,6 @@ private:
         char8_t reply[1024];
         while (true) {
             auto payload_len = 0;
-
             size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
 
             if (reply[0] == PUBACK) {
@@ -230,22 +229,42 @@ private:
     }
 
     void message_handler(char8_t *reply, size_t len) {
+        std::cout << std::endl;
         string rep((char *) reply, len);
-        uint16_t topic_len = reply[2] << 8 | reply[3];
-        string topic = rep.substr(4, topic_len);
-        string msg = rep.substr(4 + topic_len);
+        uint16_t qos = (reply[0] & 0x07) >> 1;
+        std::cout << qos;
+        uint16_t payload_start = len / 128 + 2;
+        uint16_t topic_len = reply[payload_start] << 8 | reply[payload_start + 1];
+        uint16_t header_len = payload_start + 2;
+        string topic = rep.substr(header_len, topic_len);
+        string msg = rep.substr(header_len + (qos ? 2 : 0) + topic_len);
+
+        uint16_t rec_msg_id[] = {reply[header_len + topic_len], reply[header_len + topic_len + 1]};
+        if (qos == 1) {
+            buffer[0] = PUBACK;
+            buffer[1] = 0x2;
+            buffer[2] = rec_msg_id[0];
+            buffer[3] = rec_msg_id[1];
+            write_to_socket(4);
+        }
         on_message(topic, msg);
     }
 
 public:
 
     //user callbacks
-    std::function<void(const string&, const string&)> on_message = nullptr;
+    std::function<void(const string &, const string &)> on_message = nullptr;
 
-    Mqtt_client(const string &ip = "127.0.0.1", uint16_t port = 1883): port(port) {
+    Mqtt_client(const string &ip = "127.0.0.1", uint16_t port = 1883) : port(port) {
         endpoint.address(boost::asio::ip::address::from_string(ip));
         endpoint.port(port);
         std::thread([&]() { read(); }).detach();
+        std::thread([&]() {
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(PING_TIMEOUT));
+                send_pingreq();
+            }
+        }).detach();
         socket.connect(endpoint);
         std::cout << socket.local_endpoint() << std::endl;
         signal(SIGPIPE, SIG_IGN);
@@ -263,7 +282,7 @@ public:
         return publish(topic, payload, (uint16_t) strlen(payload), retain, qos);
     }
 
-    bool subscribe(const char *topic, const uint8_t qos, bool unsubscribe = false) {
+    bool subscribe(const char *topic, const uint8_t qos = 0, bool unsubscribe = false) {
         last_sub_acked = false;
         uint16_t payload_len = 2; // packet identifier
         const char *p = topic, *p2 = p;
