@@ -61,7 +61,7 @@ bool Mqtt_client::publish(const char *topic, const char *payload, const uint16_t
         len += put_string(payload, buffer, len);
         ok = write_to_socket(len);
         if (qos == 0) last_pub_acked = ok;
-        else if (!wait_puback(100)) {
+        else if (!wait_puback()) {
             if (try_num < max_try) {
                 publish(topic, payload, retain, qos);
             } else {
@@ -110,7 +110,6 @@ void Mqtt_client::read() {
 awaitable<void> Mqtt_client::read_from_socket() {
     char8_t reply[1024];
     while (true) {
-        auto payload_len = 0;
         size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
 
         if (reply[0] == PUBACK) {
@@ -169,7 +168,7 @@ void Mqtt_client::message_handler(char8_t *reply, size_t len) {
     string rep((char *) reply, len);
     uint16_t qos = (reply[0] & 0x07) >> 1;
     std::cout << qos;
-    uint16_t payload_start = len / 128 + 2;
+    uint16_t payload_start = len / 0x80 + 2;
     uint16_t topic_len = reply[payload_start] << 8 | reply[payload_start + 1];
     uint16_t header_len = payload_start + 2;
     string topic = rep.substr(header_len, topic_len);
@@ -236,7 +235,7 @@ bool Mqtt_client::subscribe(const char *topic, const uint8_t qos, bool unsubscri
         p = *p2 ? p2 + 1 : p2; // Skip comma if several topics are listed
     }
     bool ok = write_to_socket(len);
-    if (!wait_suback(100)) {
+    if (!wait_suback()) {
         if (try_num < max_try) {
             subscribe(topic, qos, unsubscribe);
         } else {
@@ -261,7 +260,3 @@ bool Mqtt_client::connack_handler() {
 Mqtt_client::~Mqtt_client() {
     write_to_socket(DISCONNECT_2, 2);
 }
-
-
-
-
