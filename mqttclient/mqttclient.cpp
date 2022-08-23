@@ -108,10 +108,13 @@ void Mqtt_client::read() {
 }
 
 awaitable<void> Mqtt_client::read_from_socket() {
-    char8_t reply[1024];
+    char8_t reply[1024*1024];
     while (true) {
         size_t n = co_await socket.async_receive(boost::asio::buffer(reply, max_length), use_awaitable);
-
+//        for(auto i = 0; i < n; ++i){
+//            std::cout << std::hex << int(reply[i]) << ' ';
+//        }
+        std::cout << std::endl;
         if (reply[0] == PUBACK) {
             puback_handler(reinterpret_cast<char8_t *>(reply), n);
         } else if ((reply[0] & PUBLISH) == PUBLISH) {
@@ -164,11 +167,9 @@ bool Mqtt_client::wait_connack(uint16_t timeout_ms) {
 }
 
 void Mqtt_client::message_handler(char8_t *reply, size_t len) {
-    std::cout << std::endl;
     string rep((char *) reply, len);
     uint16_t qos = (reply[0] & 0x07) >> 1;
-    std::cout << qos;
-    uint16_t payload_start = len / 0x80 + 2;
+    uint16_t payload_start = 2+  ((len > 0x80)?1:0);
     uint16_t topic_len = reply[payload_start] << 8 | reply[payload_start + 1];
     uint16_t header_len = payload_start + 2;
     string topic = rep.substr(header_len, topic_len);
@@ -206,6 +207,7 @@ bool Mqtt_client::connect() {
     std::copy(msg, msg + sizeof(msg), buffer);
     write_to_socket(sizeof(msg));
     if (!wait_connack()) throw std::invalid_argument("ERROR");
+    std::cerr << "connected\n";
     return last_conn_acked;
 }
 
