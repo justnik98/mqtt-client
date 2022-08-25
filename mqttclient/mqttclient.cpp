@@ -114,7 +114,6 @@ awaitable<void> Mqtt_client::read_from_socket() {
 //        for(auto i = 0; i < n; ++i){
 //            std::cout << std::hex << int(reply[i]) << ' ';
 //        }
-        std::cout << std::endl;
         if (reply[0] == PUBACK) {
             puback_handler(reinterpret_cast<char8_t *>(reply), n);
         } else if ((reply[0] & PUBLISH) == PUBLISH) {
