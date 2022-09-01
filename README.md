@@ -1,2 +1,2 @@
 # mqtt-client
-Mqtt multithread async client
+Mqtt multithread async client.
